@@ -1,21 +1,25 @@
 import werkzeug.datastructures
-import urlparse
 import requests
 import hashlib
 import hashids
 import uuid
 import json
-from urlparse import urljoin
+from urllib.parse import urljoin, urlparse
 from flask import request, g
 
 from formspree import settings
-from formspree.app import redis_store, DB
+from formspree.stuff import redis_store, DB
+from flask import jsonify
+from flask_login import current_user
 
 CAPTCHA_URL = 'https://www.google.com/recaptcha/api/siteverify'
 CAPTCHA_VAL = 'g-recaptcha-response'
 
 HASH = lambda x, y: hashlib.md5(x.encode('utf-8')+y.encode('utf-8')+settings.NONCE_SECRET).hexdigest()
-EXCLUDE_KEYS = {'_gotcha', '_next', '_subject', '_cc', '_format', CAPTCHA_VAL, '_host_nonce', '_language'}
+
+KEYS_NOT_STORED = {'_gotcha', '_format', '_language', CAPTCHA_VAL, '_host_nonce'}
+KEYS_EXCLUDED_FROM_EMAIL = KEYS_NOT_STORED.union({'_subject', '_cc', '_next'})
+
 REDIS_COUNTER_KEY = 'monthly_{form_id}_{month}'.format
 REDIS_HOSTNAME_KEY = 'hostname_{nonce}'.format
 REDIS_FIRSTSUBMISSION_KEY = 'first_{nonce}'.format
@@ -39,7 +43,7 @@ def ordered_storage(f):
 def referrer_to_path(r):
     if not r:
         return ''
-    parsed = urlparse.urlparse(r)
+    parsed = urlparse(r)
     n = parsed.netloc + parsed.path
     return n
 
@@ -47,7 +51,7 @@ def referrer_to_path(r):
 def referrer_to_baseurl(r):
     if not r:
         return ''
-    parsed = urlparse.urlparse(r)
+    parsed = urlparse(r)
     n = parsed.netloc
     return n
 
@@ -61,12 +65,10 @@ def http_form_to_dict(data):
     ret = {}
     ordered_keys = []
 
-    for elem in data.iteritems(multi=True):
+    for elem in data.items(multi=True):
         if not elem[0] in ret.keys():
             ret[elem[0]] = []
-
-            if not elem[0] in EXCLUDE_KEYS:
-                ordered_keys.append(elem[0])
+            ordered_keys.append(elem[0])
 
         ret[elem[0]].append(elem[1])
 
@@ -146,7 +148,7 @@ def get_temp_hostname(nonce):
     if value is None:
         raise KeyError("no temp_hostname stored.")
     redis_store.delete(key)
-    values = value.split(',')
+    values = value.decode('utf-8').split(',')
     if len(values) != 2:
         raise ValueError("temp_hostname value is invalid: " + value)
     else:
@@ -163,6 +165,19 @@ def fetch_first_submission(nonce):
     key = REDIS_FIRSTSUBMISSION_KEY(nonce=nonce)
     jsondata = redis_store.get(key)
     try:
-        return json.loads(jsondata)
+        return json.loads(jsondata.decode('utf-8'))
     except:
         return None
+
+def check_valid_form_settings_request(form):
+    if not valid_domain_request(request):
+        return jsonify(error='The request you made is not valid.<br />Please visit your dashboard and try again.'), 400
+
+    if form.owner_id != current_user.id and form not in current_user.forms:
+        return jsonify(
+            error='You aren\'t the owner of that form.<br />Please log in as the form owner and try again.'), 400
+
+    if not form:
+        return jsonify(error='That form does not exist. Please check the link and try again.'), 400
+
+    return True

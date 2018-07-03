@@ -4,6 +4,21 @@
     <meta name="viewport" content="width=device-width" />
     <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
     <title>Confirm Form</title>
+    <script type="application/ld+json">
+{
+  "@context": "http://schema.org",
+  "@type": "EmailMessage",
+  "potentialAction": {
+    "@type": "ConfirmAction",
+    "name": "Confirm Form",
+    "handler": {
+      "@type": "HttpActionHandler",
+      "url": "{{ nonce_link }}"
+    }
+  },
+  "description": "Confirm form on {{ host }}"
+}
+    </script>
 </head>
   <body itemscope="" itemtype="http://schema.org/EmailMessage" style="font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; box-sizing: border-box; font-size: 14px; -webkit-font-smoothing: antialiased; -webkit-text-size-adjust: none; width: 100% !important; height: 100%; line-height: 1.6em; background-color: #FFF; margin: 0; padding: 0;" bgcolor="#FFF">
     <table class="body-wrap" style="font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; box-sizing: border-box; font-size: 14px; width: 100%; background-color: #FFF; margin: 0;" bgcolor="#FFF">
@@ -27,7 +42,7 @@
                                     </tr>
                                     <tr style="font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; box-sizing: border-box; font-size: 14px; margin: 0;">
                                         <td class="content-block" style="font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; box-sizing: border-box; font-size: 14px; vertical-align: top; margin: 0; padding: 0 0 20px;" valign="top">
-                                            All you have to do is click the link below to confirm your email. To prevent spamming, you'll have to repeat this step for every page where you insert your form. Note that you won't receive any further emails until you confirm.
+                                            All you have to do is click the link below to confirm your email. To prevent spamming, you'll have to repeat this step for every page where you insert your form. Note that you won't receive any further emails until you confirm. By clicking Confirm Form, you agree to our <a href="http://docs.formspree.io/files/terms.pdf" style="box-sizing: border-box; font-size: 14px; color: #348eda; text-decoration: underline; margin: 0;">Terms</a> and that you have read our <a href="http://docs.formspree.io/files/privacy.pdf" style="box-sizing: border-box; font-size: 14px; color: #348eda; text-decoration: underline; margin: 0;">Privacy Policy</a>.
                                         </td>
                                     </tr>
                                     <tr style="font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; box-sizing: border-box; font-size: 14px; margin: 0;">

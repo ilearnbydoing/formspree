@@ -1,18 +1,23 @@
+import hmac
 import random
+import hashlib
 import datetime
 
-from formspree.app import DB, redis_store
-from formspree import settings
-from formspree.utils import send_email, unix_time_for_12_months_from_now, \
-                            next_url, IS_VALID_EMAIL, request_wants_json
 from flask import url_for, render_template, g
+from sqlalchemy.sql import table
 from sqlalchemy.sql.expression import delete
 from sqlalchemy import func
 from werkzeug.datastructures import ImmutableMultiDict, \
                                     ImmutableOrderedMultiDict
-from helpers import HASH, HASHIDS_CODEC, REDIS_COUNTER_KEY, \
+
+from formspree import settings
+from formspree.stuff import DB, redis_store
+from formspree.utils import send_email, unix_time_for_12_months_from_now, \
+                            next_url, IS_VALID_EMAIL, request_wants_json
+from .helpers import HASH, HASHIDS_CODEC, REDIS_COUNTER_KEY, \
                     http_form_to_dict, referrer_to_path, \
-                    store_first_submission, fetch_first_submission
+                    store_first_submission, fetch_first_submission, \
+                    KEYS_NOT_STORED
 
 
 class Form(DB.Model):
@@ -30,6 +35,8 @@ class Form(DB.Model):
     owner_id = DB.Column(DB.Integer, DB.ForeignKey('users.id'))
     captcha_disabled = DB.Column(DB.Boolean)
     uses_ajax = DB.Column(DB.Boolean)
+    disable_email = DB.Column(DB.Boolean)
+    disable_storage = DB.Column(DB.Boolean)
 
     owner = DB.relationship('User') # direct owner, defined by 'owner_id'
                                     # this property is basically useless. use .controllers
@@ -59,6 +66,7 @@ class Form(DB.Model):
     STATUS_EMAIL_FAILED            = 2
     STATUS_OVERLIMIT               = 3
     STATUS_REPLYTO_ERROR           = 4
+    STATUS_NO_EMAIL                = 5
 
     STATUS_CONFIRMATION_SENT       = 10
     STATUS_CONFIRMATION_DUPLICATED = 11
@@ -154,15 +162,20 @@ class Form(DB.Model):
 
         # increment the forms counter
         self.counter = Form.counter + 1
-        DB.session.add(self)
 
-        # archive the form contents
-        sub = Submission(self.id)
-        sub.data = data
-        DB.session.add(sub)
+        # if submission storage is disabled and form is upgraded, don't store submission
+        if self.disable_storage and self.upgraded:
+            pass
+        else:
+            DB.session.add(self)
 
-        # commit changes
-        DB.session.commit()
+            # archive the form contents
+            sub = Submission(self.id)
+            sub.data = {key: data[key] for key in data if key not in KEYS_NOT_STORED}
+            DB.session.add(sub)
+
+            # commit changes
+            DB.session.commit()
 
         # sometimes we'll delete all archived submissions over the limit
         if random.random() < settings.EXPENSIVELY_WIPE_SUBMISSIONS_FREQUENCY:
@@ -174,7 +187,7 @@ class Form(DB.Model):
             if total_records > records_to_keep:
                 newest = self.submissions.with_entities(Submission.id).limit(records_to_keep)
                 DB.engine.execute(
-                  delete('submissions'). \
+                  delete(table('submissions')). \
                   where(Submission.form_id == self.id). \
                   where(~Submission.id.in_(newest))
                 )
@@ -214,33 +227,46 @@ class Form(DB.Model):
             text = render_template('email/overlimit-notification.txt', host=self.host)
             html = render_template('email/overlimit-notification.html', host=self.host)
 
-        result = send_email(
-            to=self.email,
-            subject=subject,
-            text=text,
-            html=html,
-            sender=settings.DEFAULT_SENDER,
-            reply_to=reply_to,
-            cc=cc
-        )
+        # if emails are disabled and form is upgraded, don't send email notification
+        if self.disable_email and self.upgraded:
+            return {'code': Form.STATUS_NO_EMAIL, 'next': next}
+        else:
+            result = send_email(
+                to=self.email,
+                subject=subject,
+                text=text,
+                html=html,
+                sender=settings.DEFAULT_SENDER,
+                reply_to=reply_to,
+                cc=cc,
+                headers={
+                    'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+                    'List-Unsubscribe': '<' + url_for(
+                        'unconfirm_form',
+                        form_id=self.id,
+                        digest=self.unconfirm_digest(),
+                        _external=True
+                    ) + '>'
+                }
+            )
 
-        if not result[0]:
-            g.log.warning('Failed to send email.',
-                          reason=result[1], code=result[2])
-            if result[1].startswith('Invalid replyto email address'):
+            if not result[0]:
+                g.log.warning('Failed to send email.',
+                              reason=result[1], code=result[2])
+                if result[1].startswith('Invalid replyto email address'):
+                    return {
+                        'code': Form.STATUS_REPLYTO_ERROR,
+                        'address': reply_to,
+                        'referrer': referrer
+                    }
+
                 return {
-                    'code': Form.STATUS_REPLYTO_ERROR,
-                    'address': reply_to,
-                    'referrer': referrer
+                    'code': Form.STATUS_EMAIL_FAILED,
+                    'mailer-code': result[2],
+                    'error-message': result[1]
                 }
 
-            return {
-                'code': Form.STATUS_EMAIL_FAILED,
-                'mailer-code': result[2],
-                'error-message': result[1]
-            }
-
-        return {'code': Form.STATUS_EMAIL_SENT, 'next': next}
+            return {'code': Form.STATUS_EMAIL_SENT, 'next': next}
 
     def get_monthly_counter(self, basedate=None):
         basedate = basedate or datetime.datetime.now()
@@ -293,11 +319,26 @@ class Form(DB.Model):
                                    nonce_link=link,
                                    keys=keys)
 
-        result = send_email(to=self.email,
-                            subject='Confirm email for %s' % settings.SERVICE_NAME,
-                            text=render_content('txt'),
-                            html=render_content('html'),
-                            sender=settings.DEFAULT_SENDER)
+        DB.session.add(self)
+        DB.session.flush()
+
+        result = send_email(
+            to=self.email,
+            subject='Confirm email for {} on {}' \
+                .format(settings.SERVICE_NAME, self.host),
+            text=render_content('txt'),
+            html=render_content('html'),
+            sender=settings.DEFAULT_SENDER,
+            headers={
+                'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+                'List-Unsubscribe': '<' + url_for(
+                    'unconfirm_form',
+                    form_id=self.id,
+                    digest=self.unconfirm_digest(),
+                    _external=True
+                ) + '>'
+            }
+        )
         g.log.debug('Confirmation email queued.')
 
         if not result[0]:
@@ -347,6 +388,27 @@ class Form(DB.Model):
                 raise Exception("this form doesn't have an id yet, commit it first.")
             self._hashid = HASHIDS_CODEC.encode(self.id)
         return self._hashid
+
+    def unconfirm_digest(self):
+        return hmac.new(
+            settings.NONCE_SECRET,
+            'id={}'.format(self.id).encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()
+
+    def unconfirm_with_digest(self, digest):
+        if hmac.new(
+            settings.NONCE_SECRET,
+            'id={}'.format(self.id).encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest() != digest:
+            return False
+
+        self.confirmed = False
+        DB.session.add(self)
+        DB.session.commit()
+        return True
+
 
 from sqlalchemy.dialects.postgresql import JSON
 from sqlalchemy.ext.mutable import MutableDict
